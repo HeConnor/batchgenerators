@@ -45,6 +45,7 @@ def create_zero_centered_coordinate_mesh(shape):
 
 def convert_seg_image_to_one_hot_encoding(image, classes=None):
     '''
+    image must be either (x, y, z) or (x, y)
     Takes as input an nd array of a label map (any dimension). Outputs a one hot encoding of the label map.
     Example (3D): if input is of shape (x, y, z), the output will ne of shape (n_classes, x, y, z)
     '''
@@ -56,12 +57,50 @@ def convert_seg_image_to_one_hot_encoding(image, classes=None):
     return out_image
 
 
+def convert_seg_image_to_one_hot_encoding_batched(image, classes=None):
+    '''
+    same as convert_seg_image_to_one_hot_encoding, but expects image to be (b, x, y, z) or (b, x, y)
+    '''
+    if classes is None:
+        classes = np.unique(image)
+    output_shape = [image.shape[0]] + [len(classes)] + list(image.shape[1:])
+    out_image = np.zeros(output_shape, dtype=image.dtype)
+    for b in range(image.shape[0]):
+        for i, c in enumerate(classes):
+            out_image[b, i][image[b] == c] = 1
+    return out_image
+
+
 def elastic_deform_coordinates(coordinates, alpha, sigma):
     n_dim = len(coordinates)
     offsets = []
     for _ in range(n_dim):
         offsets.append(
             gaussian_filter((np.random.random(coordinates.shape[1:]) * 2 - 1), sigma, mode="constant", cval=0) * alpha)
+    offsets = np.array(offsets)
+    indices = offsets + coordinates
+    return indices
+
+
+def elastic_deform_coordinates_2(coordinates, sigmas, magnitudes):
+    '''
+    magnitude can be a tuple/list
+    :param coordinates:
+    :param sigma:
+    :param magnitude:
+    :return:
+    '''
+    if not isinstance(magnitudes, (tuple, list)):
+        magnitudes = [magnitudes] * (len(coordinates) - 1)
+    if not isinstance(sigmas, (tuple, list)):
+        sigmas = [sigmas] * (len(coordinates) - 1)
+    n_dim = len(coordinates)
+    offsets = []
+    for d in range(n_dim):
+        offsets.append(
+            gaussian_filter((np.random.random(coordinates.shape[1:]) * 2 - 1), sigmas, mode="constant", cval=0))
+        mx = np.max(np.abs(offsets[-1]))
+        offsets[-1] = offsets[-1] / (mx / (magnitudes[d] + 1e-8))
     offsets = np.array(offsets)
     indices = offsets + coordinates
     return indices
@@ -83,7 +122,13 @@ def rotate_coords_2d(coords, angle):
 
 
 def scale_coords(coords, scale):
-    return coords * scale
+    if isinstance(scale, (tuple, list, np.ndarray)):
+        assert len(scale) == len(coords)
+        for i in range(len(scale)):
+            coords[i] *= scale[i]
+    else:
+        coords *= scale
+    return coords
 
 
 def uncenter_coords(coords):
@@ -518,7 +563,7 @@ def convert_seg_to_bounding_box_coordinates(data_dict, dim, get_rois_from_seg_fl
 
         data_dict['bb_target'] = np.array(bb_target)
         data_dict['roi_masks'] = np.array(roi_masks)
-        data_dict['roi_labels'] = np.array(roi_labels)
+        data_dict['class_target'] = np.array(roi_labels)
         data_dict['seg'] = out_seg
 
         return data_dict
@@ -547,12 +592,13 @@ def resize_segmentation(segmentation, new_shape, order=3, cval=0):
     unique_labels = np.unique(segmentation)
     assert len(segmentation.shape) == len(new_shape), "new shape must have same dimensionality as segmentation"
     if order == 0:
-        return resize(segmentation, new_shape, order, mode="constant", cval=cval, clip=True, anti_aliasing=False).astype(tpe)
+        return resize(segmentation.astype(float), new_shape, order, mode="constant", cval=cval, clip=True, anti_aliasing=False).astype(tpe)
     else:
         reshaped = np.zeros(new_shape, dtype=segmentation.dtype)
 
         for i, c in enumerate(unique_labels):
-            reshaped_multihot = resize((segmentation == c).astype(float), new_shape, order, mode="edge", clip=True, anti_aliasing=False)
+            mask = segmentation == c
+            reshaped_multihot = resize(mask.astype(float), new_shape, order, mode="edge", clip=True, anti_aliasing=False)
             reshaped[reshaped_multihot >= 0.5] = c
         return reshaped
 
@@ -665,7 +711,12 @@ def pad_nd_image(image, new_shape=None, mode="constant", kwargs=None, return_sli
     pad_below = difference // 2
     pad_above = difference // 2 + difference % 2
     pad_list = [[0, 0]]*num_axes_nopad + list([list(i) for i in zip(pad_below, pad_above)])
-    res = np.pad(image, pad_list, mode, **kwargs)
+
+    if not ((all([i == 0 for i in pad_below])) and (all([i == 0 for i in pad_above]))):
+        res = np.pad(image, pad_list, mode, **kwargs)
+    else:
+        res = image
+
     if not return_slicer:
         return res
     else:
@@ -673,7 +724,6 @@ def pad_nd_image(image, new_shape=None, mode="constant", kwargs=None, return_sli
         pad_list[:, 1] = np.array(res.shape) - pad_list[:, 1]
         slicer = list(slice(*i) for i in pad_list)
         return res, slicer
-
 
 
 def mask_random_square(img, square_size, n_val, channel_wise_n_val=False, square_pos=None):

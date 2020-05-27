@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import copy
-from warnings import warn
 import numpy as np
 
 from batchgenerators.augmentations.utils import convert_seg_image_to_one_hot_encoding, \
@@ -53,10 +52,14 @@ class NumpyToTensor(AbstractTransform):
             for key, val in data_dict.items():
                 if isinstance(val, np.ndarray):
                     data_dict[key] = self.cast(torch.from_numpy(val)).contiguous()
+                elif isinstance(val, (list, tuple)) and all([isinstance(i, np.ndarray) for i in val]):
+                    data_dict[key] = [self.cast(torch.from_numpy(i)).contiguous() for i in val]
         else:
             for key in self.keys:
                 if isinstance(data_dict[key], np.ndarray):
                     data_dict[key] = self.cast(torch.from_numpy(data_dict[key])).contiguous()
+                elif isinstance(data_dict[key], (list, tuple)) and all([isinstance(i, np.ndarray) for i in data_dict[key]]):
+                    data_dict[key] = [self.cast(torch.from_numpy(i)).contiguous() for i in data_dict[key]]
 
         return data_dict
 
@@ -225,20 +228,21 @@ class ConvertSegToBoundingBoxCoordinates(AbstractTransform):
         data_dict = convert_seg_to_bounding_box_coordinates(data_dict, self.dim, self.get_rois_from_seg_flag, class_specific_seg_flag=self.class_specific_seg_flag)
         return data_dict
 
+
 class MoveSegToDataChannel(AbstractTransform):
-    """ Converts segmentation masks into bounding box coordinates. Works only for one object per image
     """
-
-
+    concatenates data_dict['seg'] to data_dict['data']
+    """
     def __call__(self, **data_dict):
         data_dict['data'] = np.concatenate((data_dict['data'], data_dict['seg']), axis=1)
         return data_dict
 
 
-
-
-class TransposeChannels(AbstractTransform):
-    """ Converts segmentation masks into bounding box coordinates. Works only for one object per image
+class ColorChannelToLastAxisTransform(AbstractTransform):
+    """
+    moves the color channel to the last axis
+    For example:
+    shape (b, c, x, y, z) -> shape (b, x, y, z, c)
     """
 
     def __call__(self, **data_dict):
@@ -396,7 +400,7 @@ class AppendChannelsTransform(AbstractTransform):
         selected_channels = inp[:, self.channel_indexes]
 
         if outp is None:
-            warn("output key %s is not present in dict, it will be created" % self.output_key)
+            #warn("output key %s is not present in dict, it will be created" % self.output_key)
             outp = selected_channels
             data_dict[self.output_key] = outp
         else:
@@ -408,4 +412,31 @@ class AppendChannelsTransform(AbstractTransform):
             inp = inp[:, remaining]
             data_dict[self.input_key] = inp
 
+        return data_dict
+
+
+class ConvertToChannelLastTransform(AbstractTransform):
+    def __init__(self, input_keys):
+        """
+        converts all keys listed in input_keys from (b, c, x, y(, z)) to (b, x, y(, z), c).
+        """
+        self.input_keys = input_keys
+
+    def __call__(self, **data_dict):
+        for k in self.input_keys:
+            data = data_dict.get(k)
+            if data is None:
+                print("WARNING in ConvertToChannelLastTransform: data_dict has no key named", k)
+            else:
+                if len(data.shape) == 4:
+                    new_ordering = (0, 2, 3, 1)
+                elif len(data.shape) == 5:
+                    new_ordering = (0, 2, 3, 4, 1)
+                else:
+                    raise RuntimeError("unsupported dimensionality for ConvertToChannelLastTransform:",
+                                       len(data.shape),
+                                       ". Only 2d (b, c, x, y) and 3d (b, c, x, y, z) are supported for now.")
+                assert isinstance(data, np.ndarray), "data_dict[k] must be a numpy array"
+                data = data.transpose(new_ordering)
+                data_dict[k] = data
         return data_dict
